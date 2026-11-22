@@ -152,18 +152,54 @@ def main():
         py = top_y + math.sin(a) * 92 * rr
         d.ellipse([px - 3, py - 2, px + 3, py + 2], fill=(255, 250, 240, 200))
 
-    # ---- steam wisps above the stack ----
+    # ---- steam wisps above the stack (4 wisps, taller, softer glow) ----
     steam = Image.new("RGBA", (W2, H2), (0, 0, 0, 0))
     ds = ImageDraw.Draw(steam)
-    for sx, phase, amp in [(cx - 140, 0.0, 46), (cx + 40, 1.4, 60), (cx + 210, 2.6, 42)]:
+    for sx, phase, amp in [(cx - 220, 0.6, 52), (cx - 140, 0.0, 46),
+                           (cx + 40, 1.4, 60), (cx + 210, 2.6, 42)]:
         pts = []
-        for t in range(0, 101):
-            yy = top_y - 160 - t * 5.2
+        for t in range(0, 121):
+            yy = top_y - 150 - t * 5.4
             xx = sx + math.sin(t / 12.0 + phase) * amp * (t / 100.0 + 0.3)
             pts.append((xx, yy))
-        ds.line(pts, fill=(255, 255, 255, 110), width=26, joint="curve")
-    steam = steam.filter(ImageFilter.GaussianBlur(18))
+        ds.line(pts, fill=(255, 255, 255, 130), width=30, joint="curve")
+    steam = steam.filter(ImageFilter.GaussianBlur(20))
     img = Image.alpha_composite(img.convert("RGBA"), steam).convert("RGB")
+
+    # ---- honey-drizzle highlight across the top syrup pool ----
+    d2 = ImageDraw.Draw(img, "RGBA")
+    for k in range(5):
+        x0 = cx - 96 + k * 40
+        d2.arc([x0 - 26, top_y - 58, x0 + 26, top_y + 34], 200, 340,
+               fill=(255, 214, 110, 190), width=7)
+    d2.ellipse([cx - 58, top_y - 26, cx - 6, top_y - 2], fill=(255, 226, 140, 170))
+
+    # ---- warmer plate rim light + deeper pancake-edge browning ----
+    rim = Image.new("RGBA", (W2, H2), (0, 0, 0, 0))
+    dr = ImageDraw.Draw(rim)
+    # golden rim light hugging the lower edge of the plate
+    dr.arc([cx - 760, plate_cy - 190, cx + 760, plate_cy + 190], 15, 165,
+           fill=(255, 196, 110, 150), width=16)
+    dr.arc([cx - 700, plate_cy - 172, cx + 700, plate_cy + 172], 25, 155,
+           fill=(255, 220, 150, 110), width=8)
+    # deeper toasted browning around the edge of each pancake top
+    for i, (cy_top, rx, ry, side_rx, side_h) in enumerate(layers):
+        top_y_i = base_top - i * step
+        dr.ellipse([cx - rx, top_y_i - ry, cx + rx, top_y_i + ry],
+                   outline=(172, 100, 34, 150), width=14)
+    rim = rim.filter(ImageFilter.GaussianBlur(6))
+    img = Image.alpha_composite(img.convert("RGBA"), rim).convert("RGB")
+
+    # ---- soft vignette to lead the eye to the dish ----
+    vig = Image.new("RGBA", (W2, H2), (0, 0, 0, 0))
+    dv = ImageDraw.Draw(vig)
+    for r in range(1500, 700, -10):
+        t = (1500 - r) / 800.0
+        a = int(70 * t * t)
+        dv.ellipse([cx - r, H2 // 2 - 60 - r, cx + r, H2 // 2 - 60 + r],
+                   outline=(60, 30, 10, a), width=10)
+    vig = vig.filter(ImageFilter.GaussianBlur(30))
+    img = Image.alpha_composite(img.convert("RGBA"), vig).convert("RGB")
 
     # ---- downscale, save ----
     img = img.resize((W, H), Image.LANCZOS)
