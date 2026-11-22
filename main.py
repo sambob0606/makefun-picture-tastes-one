@@ -235,21 +235,30 @@ def main():
         py = int(top_y + math.sin(a) * 92 * rr)
         ellipse(px, py, 3, 2, (255, 250, 240))
 
-    # ---- steam wisps above the stack (chains of pale discs, two passes:
-    # a wider faint wisp plus a brighter narrow core so they read clearly) ----
-    for sx, phase, amp in [(cx - 220, 0.6, 52), (cx - 140, 0.0, 46),
-                           (cx + 40, 1.4, 60), (cx + 210, 2.6, 42)]:
-        for t in range(0, 121):
-            yy = int(top_y - 150 - t * 5.4)
-            xx = int(sx + math.sin(t / 12.0 + phase) * amp * (t / 100.0 + 0.3))
-            disc(xx, yy, 20, (255, 252, 242))
-            disc(xx, yy, 10, (255, 255, 255))
+    # ---- steam wisps above the stack (ROUND 4: taller, wider, stronger) ----
+    # Five rising wisps instead of four: each is a chain of pale discs with a
+    # brighter narrow core, now climbing 160 steps (was 121) so the steam
+    # clearly reads as fresh-from-the-griddle heat above the butter.
+    for sx, phase, amp in [(cx - 260, 0.6, 58), (cx - 170, 0.0, 52),
+                           (cx - 30, 1.4, 64), (cx + 140, 2.6, 48),
+                           (cx + 260, 3.8, 56)]:
+        for t in range(0, 161):
+            yy = int(top_y - 150 - t * 4.6)
+            xx = int(sx + math.sin(t / 11.0 + phase) * amp * (t / 100.0 + 0.3))
+            disc(xx, yy, 24, (255, 252, 242))
+            disc(xx, yy, 12, (255, 255, 255))
 
     # ---- honey-drizzle highlight across the top syrup pool ----
     for k in range(5):
         x0 = cx - 96 + k * 40
         arc_discs(x0, top_y - 12, 26, 46, 200, 340, 6, 4, (255, 214, 110))
     ellipse(cx - 32, top_y - 14, 26, 12, (255, 226, 140))
+    # second gloss streak on the lower half of the syrup pool, so the
+    # syrup catches the light twice (ROUND 4 pass 2)
+    for k in range(4):
+        x0 = cx - 72 + k * 44
+        arc_discs(x0, top_y + 22, 30, 44, 200, 340, 6, 3, (255, 204, 96))
+    ellipse(cx + 18, top_y + 24, 20, 9, (255, 220, 130))
 
     # ---- golden rim light hugging the lower edge of the plate ----
     arc_discs(cx, plate_cy, 760, 190, 15, 165, 2, 8, (255, 196, 110))

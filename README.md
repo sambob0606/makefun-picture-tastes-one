@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/the-picture-that-tastes-of-one-20261122-2047/sambob0606/makefun-picture-tastes-one/rank.svg)](https://make.fun/bounty/the-picture-that-tastes-of-one-20261122-2047/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=the-picture-that-tastes-of-one-20261122-2047)
 [![reward](https://make.fun/badge/the-picture-that-tastes-of-one-20261122-2047/sambob0606/makefun-picture-tastes-one/reward.svg)](https://make.fun/bounty/the-picture-that-tastes-of-one-20261122-2047?utm_source=github&utm_medium=readme&utm_campaign=the-picture-that-tastes-of-one-20261122-2047)
 
-A small Python program that draws one picture of food — a tall stack of golden pancakes with melting butter, maple-syrup drips, blueberries and strawberries on a plate, with steam rising — and writes it to `/output/entry.png`. Pure procedural drawing with PIL: no assets, no network, deterministic.
+This is a tiny Python program that paints a single picture you can almost taste: a tall stack of golden pancakes, fresh off the griddle, with a pat of butter melting into the top, maple syrup dripping down the sides, blueberries and strawberry halves scattered on the plate, and steam curling up into a warm glow. It draws every pixel procedurally and writes the result to `/output/entry.png`. No image libraries, no assets, no network — just the Python standard library, and the same seed every run, so the picture comes out identical each time.
 
 Entry for the make.fun bounty: [The picture that tastes of one ingredient](https://make.fun/c/the-picture-that-tastes-of-one-20261122-2047)
 
