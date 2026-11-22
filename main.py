@@ -1,316 +1,369 @@
-#!/usr/bin/env python3
-"""The picture that tastes of one ingredient: a tall stack of golden pancakes.
+"""Pancake stack — a warm breakfast-table picture, drawn from scratch.
 
-Pure Python standard library only (no Pillow): a 2x supersampled RGB
-framebuffer, span-fill drawing helpers, 2x2 box downsample, and a hand-rolled
-PNG encoder (zlib + struct). Writes $MAKEFUN_OUTPUT_DIR/entry.png (1024x1024).
+Pure standard library only. The picture is built in a 2048x2048 RGB buffer
+with small scanline helpers, downsampled 2x2 to 1024x1024, and encoded as a
+PNG by hand (zlib + struct chunk framing). No assets, no network.
 """
+
 import math
 import os
 import random
 import struct
 import zlib
 
-S = 2  # supersample factor
-W = H = 1024
-W2, H2 = W * S, H * S
-
 random.seed(20261122)
 
-# ---- framebuffer (2x), pre-filled with the warm background base ----
-buf = bytearray(bytes((250, 233, 205)) * (W2 * H2))
+BIG = 2048          # working buffer size (2x the final picture)
+FINAL = 1024        # output picture size
+W = BIG
 
 
-def span(y, x0, x1, rgb):
-    if y < 0 or y >= H2:
-        return
-    if x0 < 0:
-        x0 = 0
-    if x1 > W2 - 1:
-        x1 = W2 - 1
-    if x1 < x0:
-        return
-    i = (y * W2 + x0) * 3
-    buf[i:i + (x1 - x0 + 1) * 3] = bytes(rgb) * (x1 - x0 + 1)
+def _clamp(v, lo, hi):
+    return lo if v < lo else hi if v > hi else v
 
 
-def ellipse(cx, cy, rx, ry, rgb):
-    if rx <= 0 or ry <= 0:
-        return
-    for y in range(cy - ry, cy + ry + 1):
-        dy = y - cy
-        t = 1.0 - (dy * dy) / float(ry * ry)
-        if t <= 0:
-            continue
-        dx = int(rx * math.sqrt(t))
-        span(y, cx - dx, cx + dx, rgb)
+class Canvas:
+    """A flat RGB byte buffer with scanline drawing helpers."""
+
+    def __init__(self, size):
+        self.size = size
+        self.px = bytearray(size * size * 3)
+
+    def run(self, y, x0, x1, color):
+        """Fill a horizontal run of pixels on row y (clipped)."""
+        if y < 0 or y >= self.size:
+            return
+        x0 = _clamp(x0, 0, self.size)
+        x1 = _clamp(x1, 0, self.size)
+        if x1 <= x0:
+            return
+        r, g, b = color
+        base = (y * self.size + x0) * 3
+        span = (x1 - x0) * 3
+        self.px[base:base + span] = bytes((r, g, b)) * (x1 - x0)
+
+    def rect(self, x0, y0, x1, y1, color):
+        for y in range(max(0, y0), min(self.size, y1)):
+            self.run(y, x0, x1, color)
+
+    def ellipse(self, cx, cy, rx, ry, color):
+        """Fill an ellipse by scanning rows and using the circle equation."""
+        if rx <= 0 or ry <= 0:
+            return
+        for y in range(max(0, cy - ry), min(self.size, cy + ry + 1)):
+            t = (y - cy) / ry
+            if t < -1.0 or t > 1.0:
+                continue
+            half = int(rx * math.sqrt(1.0 - t * t))
+            self.run(y, cx - half, cx + half + 1, color)
+
+    def disc(self, cx, cy, radius, color):
+        self.ellipse(cx, cy, radius, radius, color)
+
+    def rounded_rect(self, x0, y0, x1, y1, corner, color):
+        """Rounded rectangle via per-row insets near the top/bottom."""
+        for y in range(max(0, y0), min(self.size, y1)):
+            inset = 0
+            if y - y0 < corner:
+                dy = corner - (y - y0)
+                inset = corner - int(math.sqrt(max(0, corner * corner - dy * dy)))
+            elif y1 - 1 - y < corner:
+                dy = corner - (y1 - 1 - y)
+                inset = corner - int(math.sqrt(max(0, corner * corner - dy * dy)))
+            self.run(y, x0 + inset, x1 - inset, color)
+
+    def arc_chain(self, cx, cy, radius, a0, a1, steps, dot_r, color):
+        """Draw an arc as a chain of small discs."""
+        for i in range(steps + 1):
+            a = a0 + (a1 - a0) * i / steps
+            self.disc(int(cx + radius * math.cos(a)),
+                      int(cy + radius * math.sin(a)), dot_r, color)
+
+    def half_ellipse(self, cx, cy, rx, ry, color):
+        """Fill only the lower half of an ellipse (flat top edge)."""
+        for y in range(max(0, cy), min(self.size, cy + ry + 1)):
+            t = (y - cy) / ry
+            if t < -1.0 or t > 1.0:
+                continue
+            half = int(rx * math.sqrt(1.0 - t * t))
+            self.run(y, cx - half, cx + half + 1, color)
 
 
-def disc(x, y, r, rgb):
-    ellipse(x, y, r, r, rgb)
-
-
-def ellipse_ring(cx, cy, rx, ry, w, rgb):
-    """Filled ellipse outline of thickness w."""
-    if rx <= 0 or ry <= 0:
-        return
-    irx, iry = rx - w, ry - w
-    for y in range(cy - ry, cy + ry + 1):
-        dy = y - cy
-        t = 1.0 - (dy * dy) / float(ry * ry)
-        if t <= 0:
-            continue
-        dx = int(rx * math.sqrt(t))
-        if irx <= 0 or iry <= 0:
-            span(y, cx - dx, cx + dx, rgb)
-            continue
-        t2 = 1.0 - (dy * dy) / float(iry * iry)
-        if t2 <= 0:
-            span(y, cx - dx, cx + dx, rgb)
-            continue
-        idx = int(irx * math.sqrt(t2))
-        span(y, cx - dx, cx - idx, rgb)
-        span(y, cx + idx, cx + dx, rgb)
-
-
-def rect(x0, y0, x1, y1, rgb):
-    for y in range(max(0, y0), min(H2, y1 + 1)):
-        span(y, x0, x1, rgb)
-
-
-def rrect(x0, y0, x1, y1, r, rgb):
-    """Rounded rectangle, corners of radius r."""
-    for y in range(y0, y1 + 1):
-        if y < y0 + r:
-            d = r - (y - y0)
-            inset = r - int(math.sqrt(max(0, r * r - d * d)))
-            span(y, x0 + inset, x1 - inset, rgb)
-        elif y > y1 - r:
-            d = r - (y1 - y)
-            inset = r - int(math.sqrt(max(0, r * r - d * d)))
-            span(y, x0 + inset, x1 - inset, rgb)
-        else:
-            span(y, x0, x1, rgb)
-
-
-def half_ellipse_top(cx, cy, rx, ry, rgb):
-    """Upper half of a filled ellipse (strawberry cut side)."""
-    for y in range(cy - ry, cy + 1):
-        dy = y - cy
-        t = 1.0 - (dy * dy) / float(ry * ry)
-        if t <= 0:
-            continue
-        dx = int(rx * math.sqrt(t))
-        span(y, cx - dx, cx + dx, rgb)
-
-
-def arc_discs(cx, cy, rx, ry, a0, a1, step_deg, r, rgb):
-    a = a0
-    while a <= a1:
-        rad = math.radians(a)
-        disc(int(cx + rx * math.cos(rad)), int(cy + ry * math.sin(rad)), r, rgb)
-        a += step_deg
-
-
-def lerp(a, b, t):
+def blend(a, b, t):
+    """Linear blend between two RGB triples."""
     return (int(a[0] + (b[0] - a[0]) * t),
             int(a[1] + (b[1] - a[1]) * t),
             int(a[2] + (b[2] - a[2]) * t))
 
 
-def main():
-    # ---- warm background: radial glow ----
-    for r in range(720, 0, -6):
-        t = r / 720.0
-        ellipse(W2 // 2, H2 // 2 - 60, r, r,
-                lerp((252, 236, 208), (232, 196, 148), t))
-    # wooden table band at bottom
-    rect(0, H2 - 300, W2, H2, (176, 124, 78))
-    rect(0, H2 - 300, W2, H2 - 292, (150, 102, 60))
-    for i in range(14):
-        y = H2 - 280 + i * 20
-        rect(0, y, W2, y + 2, (166, 116, 72))
-    # soft light from upper left (matches original: bbox [-300,-300,900,500])
-    ellipse(300, 100, 600, 400, (255, 248, 225))
+# --- palette (my own numbers) ---
+GLOW_EDGE = (74, 38, 14)
+GLOW_MID = (176, 108, 42)
+GLOW_CORE = (255, 214, 138)
+WOOD = (122, 74, 34)
+WOOD_DARK = (96, 56, 24)
+WOOD_LIGHT = (148, 94, 46)
+SHADOW = (52, 30, 12)
+PLATE_RIM = (214, 202, 186)
+PLATE = (248, 244, 236)
+PANCAKE_SIDE = (176, 106, 34)
+PANCAKE_SIDE_DARK = (146, 84, 24)
+PANCAKE_TOP = (238, 184, 96)
+PANCAKE_TOP_LIGHT = (246, 204, 128)
+TOAST = (150, 88, 26)
+SYRUP = (176, 92, 8)
+SYRUP_LIGHT = (232, 148, 32)
+SYRUP_DARK = (128, 62, 4)
+BUTTER = (252, 226, 120)
+BUTTER_EDGE = (232, 196, 82)
+BERRY = (38, 48, 118)
+BERRY_LIGHT = (92, 108, 196)
+STRAW_RED = (206, 52, 64)
+STRAW_FLESH = (250, 178, 172)
+SEED = (252, 232, 150)
+SUGAR = (255, 252, 246)
+STEAM = (255, 246, 228)
 
-    cx = W2 // 2
-    plate_cy = 1560
-    # ---- soft shadow under plate ----
-    ellipse(cx, plate_cy + 45, 700, 105, (120, 70, 35))
-    # ---- plate ----
-    ellipse(cx, plate_cy, 760, 190, (244, 238, 226))
-    ellipse(cx, plate_cy - 14, 700, 172, (250, 246, 236))
-    ellipse(cx, plate_cy - 20, 560, 138, (236, 228, 210))
-    ellipse_ring(cx, plate_cy - 20, 560, 138, 5, (205, 192, 168))
 
-    # ---- pancake stack ----
-    layers = [
-        (1180, 168, 205, 138, 62),
-        (1030, 158, 192, 128, 54),
-        (880, 148, 180, 118, 46),
-        (730, 138, 168, 108, 38),
-        (580, 128, 158, 98, 30),
-    ]
-    base_top = 1380
-    step = 150
-    for i, (cy_top, rx, ry, side_rx, side_h) in enumerate(layers):
-        top_y = base_top - i * step
-        # side (golden brown, slightly darker at bottom edge)
-        ellipse(cx, top_y + side_h, rx, ry, (196, 128, 52))
-        ellipse(cx, top_y + side_h - 13, rx, ry, (212, 144, 62))
-        # toasted edge ring around the top surface
-        ellipse_ring(cx, top_y, rx, ry, 14, (172, 100, 34))
-        # top surface (warm golden)
-        ellipse(cx, top_y, rx, ry, (232, 176, 96))
-        # toasted speckles on top
-        for _ in range(90):
-            a = random.uniform(0, 2 * math.pi)
-            rr = random.uniform(0, 0.85)
-            px = int(cx + math.cos(a) * rx * rr)
-            py = int(top_y + math.sin(a) * ry * rr)
-            r = random.uniform(3, 11)
-            col = random.choice([(198, 128, 52), (214, 148, 66), (188, 116, 44)])
-            ellipse(px, py, int(r), max(1, int(r * 0.55)), col)
-
-    # ---- maple syrup: glossy pool on top + drips down the stack ----
-    syrup = (146, 74, 18)
-    syrup_hi = (198, 118, 38)
-    top_y = base_top - 4 * step
-    ellipse(cx, top_y, 128, 92, syrup)
-    ellipse(cx - 18, top_y - 14, 88, 58, syrup_hi)
-    drips = [(-150, 210, 26), (-88, 320, 30), (-10, 260, 24), (70, 360, 30),
-             (140, 240, 24), (190, 170, 20), (-210, 120, 20)]
-    for dx, length, w in drips:
-        x0 = cx + dx
-        rrect(x0 - w, top_y - 20, x0 + w, top_y + length, w, syrup)
-        ellipse(x0, top_y + length, w + 4, w + 10, syrup)
-        rrect(x0 - w + 8, top_y - 10, x0 - w + 16, top_y + length - 30, 6, syrup_hi)
-    # syrup pool on plate
-    ellipse(cx + 420, plate_cy - 40, 180, 46, syrup)
-    ellipse(cx + 400, plate_cy - 52, 120, 28, syrup_hi)
-
-    # ---- melting butter pat on top ----
-    bx, by = cx - 30, top_y - 52
-    rrect(bx - 95, by - 62, bx + 95, by + 22, 22, (255, 222, 110))
-    rrect(bx - 95, by - 62, bx + 95, by - 18, 22, (255, 236, 150))
-    rect(bx - 70, by - 44, bx + 70, by - 36, (255, 246, 190))
-    # butter melt dripping off the edge
-    rrect(bx + 55, by + 10, bx + 95, by + 78, 18, (255, 222, 110))
-    ellipse(bx + 75, by + 78, 24, 26, (255, 222, 110))
-
-    # ---- blueberries on top and plate ----
-    def blueberry(x, y, r):
-        ellipse(x, y, r, r, (52, 68, 138))
-        ellipse(int(x - r * 0.3), int(y - r * 0.35),
-                int(r * 0.55), int(r * 0.45), (96, 118, 190))
-        ellipse(x, int(y - r * 0.68), int(r * 0.18), int(r * 0.22), (30, 40, 90))
-
-    blueberry(cx + 120, top_y - 30, 52)
-    blueberry(cx + 165, top_y + 18, 44)
-    blueberry(cx - 170, top_y + 8, 46)
-    blueberry(cx - 470, plate_cy - 70, 52)
-    blueberry(cx - 380, plate_cy - 46, 44)
-    blueberry(cx + 480, plate_cy - 74, 46)
-
-    # ---- strawberry halves on the plate ----
-    def strawberry(x, y, r):
-        half_ellipse_top(x, y, r, r, (214, 58, 64))
-        ellipse(x, int(y + r * 0.32), int(r * 0.82), int(r * 0.48), (246, 190, 186))
-        for _ in range(26):
-            a = random.uniform(-1.2, 1.2)
-            rr = random.uniform(0.15, 0.7)
-            px = int(x + math.sin(a) * r * rr * 0.9)
-            py = int(y + r * 0.35 - abs(math.cos(a)) * r * rr * 0.3)
-            disc(px, py, 4, (232, 120, 110))
-        ellipse(x, int(y + r * 0.68), int(r * 0.2), int(r * 0.12), (246, 190, 186))
-
-    strawberry(cx + 330, plate_cy - 46, 84)
-    strawberry(cx - 540, plate_cy - 66, 70)
-
-    # ---- powdered sugar dusting on top pancake ----
-    for _ in range(160):
-        a = random.uniform(0, 2 * math.pi)
-        rr = random.uniform(0.5, 0.95)
-        px = int(cx + math.cos(a) * 128 * rr)
-        py = int(top_y + math.sin(a) * 92 * rr)
-        ellipse(px, py, 3, 2, (255, 250, 240))
-
-    # ---- steam wisps above the stack (ROUND 4: taller, wider, stronger) ----
-    # Five rising wisps instead of four: each is a chain of pale discs with a
-    # brighter narrow core, now climbing 160 steps (was 121) so the steam
-    # clearly reads as fresh-from-the-griddle heat above the butter.
-    for sx, phase, amp in [(cx - 260, 0.6, 58), (cx - 170, 0.0, 52),
-                           (cx - 30, 1.4, 64), (cx + 140, 2.6, 48),
-                           (cx + 260, 3.8, 56)]:
-        for t in range(0, 161):
-            yy = int(top_y - 150 - t * 4.6)
-            xx = int(sx + math.sin(t / 11.0 + phase) * amp * (t / 100.0 + 0.3))
-            disc(xx, yy, 24, (255, 252, 242))
-            disc(xx, yy, 12, (255, 255, 255))
-
-    # ---- honey-drizzle highlight across the top syrup pool ----
-    for k in range(5):
-        x0 = cx - 96 + k * 40
-        arc_discs(x0, top_y - 12, 26, 46, 200, 340, 6, 4, (255, 214, 110))
-    ellipse(cx - 32, top_y - 14, 26, 12, (255, 226, 140))
-    # second gloss streak on the lower half of the syrup pool, so the
-    # syrup catches the light twice (ROUND 4 pass 2)
-    for k in range(4):
-        x0 = cx - 72 + k * 44
-        arc_discs(x0, top_y + 22, 30, 44, 200, 340, 6, 3, (255, 204, 96))
-    ellipse(cx + 18, top_y + 24, 20, 9, (255, 220, 130))
-
-    # ---- golden rim light hugging the lower edge of the plate ----
-    arc_discs(cx, plate_cy, 760, 190, 15, 165, 2, 8, (255, 196, 110))
-    arc_discs(cx, plate_cy, 700, 172, 25, 155, 2, 4, (255, 220, 150))
-
-    # ---- downsample 2048 -> 1024 (2x2 box average) with radial vignette ----
-    col2 = [(x - 512) * (x - 512) for x in range(W)]
-    vig = []
-    for b in range(1025):
-        r = math.sqrt(b * 512.0)
-        if r <= 560.0:
-            vig.append(1.0)
+def draw_background(cv):
+    """Warm radial glow: concentric circles stepping dark -> light."""
+    cx, cy = 1024, 860
+    steps = 42
+    for i in range(steps, -1, -1):
+        t = i / steps
+        radius = int(300 + (1520 - 300) * t)
+        if t < 0.55:
+            col = blend(GLOW_EDGE, GLOW_MID, t / 0.55)
         else:
-            t = min(1.0, (r - 560.0) / 190.0)
-            vig.append(1.0 - 0.28 * t * t)
-    out = bytearray(W * H * 3)
-    for y in range(H):
-        dy2 = (y - 512) * (y - 512)
-        base0 = (2 * y) * W2 * 3
-        base1 = base0 + W2 * 3
-        orow = y * W * 3
-        for x in range(W):
-            i0 = base0 + x * 6
-            i1 = base1 + x * 6
-            f = vig[(dy2 + col2[x]) >> 9]
-            o = orow + x * 3
-            out[o] = int(((buf[i0] + buf[i0 + 3] + buf[i1] + buf[i1 + 3]) >> 2) * f)
-            out[o + 1] = int(((buf[i0 + 1] + buf[i0 + 4] + buf[i1 + 1] + buf[i1 + 4]) >> 2) * f)
-            out[o + 2] = int(((buf[i0 + 2] + buf[i0 + 5] + buf[i1 + 2] + buf[i1 + 5]) >> 2) * f)
+            col = blend(GLOW_MID, GLOW_CORE, (t - 0.55) / 0.45)
+        cv.ellipse(cx, cy, radius, radius, col)
 
-    # ---- PNG encode: filter 0 per row, zlib level 6 ----
+
+def draw_table(cv):
+    """Wooden table band across the bottom with plank seams and grain."""
+    cv.rect(0, 1490, BIG, BIG, WOOD)
+    for y in (1620, 1760, 1900):
+        cv.rect(0, y, BIG, y + 7, WOOD_DARK)
+    for _ in range(90):
+        gx = random.randint(0, BIG - 260)
+        gy = random.randint(1500, BIG - 12)
+        gl = random.randint(90, 260)
+        cv.run(gy, gx, gx + gl, WOOD_LIGHT if random.random() < 0.5 else WOOD_DARK)
+    # soft top edge highlight where the table meets the wall
+    cv.rect(0, 1490, BIG, 1498, WOOD_LIGHT)
+
+
+def draw_plate(cv):
+    """Soft shadow, then the round white plate with a rim ring."""
+    cv.ellipse(1024, 1560, 700, 118, SHADOW)
+    cv.ellipse(1024, 1420, 660, 178, PLATE_RIM)
+    cv.ellipse(1024, 1412, 628, 164, PLATE)
+    cv.arc_chain(1024, 1412, 560, 0.15, math.pi - 0.15, 90, 5, (228, 220, 206))
+
+
+def draw_syrup_pool_on_plate(cv):
+    cv.ellipse(1024, 1510, 430, 58, SYRUP)
+    cv.ellipse(1024, 1504, 380, 46, SYRUP_LIGHT)
+    cv.ellipse(1024, 1500, 300, 34, SYRUP)
+
+
+PANCAKES = [
+    # (top_y, half_width) bottom -> top
+    (1330, 468),
+    (1236, 436),
+    (1142, 402),
+    (1048, 368),
+    (954, 332),
+]
+
+
+def draw_pancake(cv, top_y, rx):
+    """One pancake: golden-brown side, lighter toasted top, speckles."""
+    side_cy = top_y + 58
+    cv.ellipse(1024, side_cy, rx, 62, PANCAKE_SIDE)
+    cv.ellipse(1024, side_cy + 26, rx - 6, 40, PANCAKE_SIDE_DARK)
+    cv.ellipse(1024, top_y, rx, 52, PANCAKE_TOP)
+    cv.ellipse(1024, top_y - 6, rx - 26, 40, PANCAKE_TOP_LIGHT)
+    # toasted speckles scattered inside the top ellipse
+    for _ in range(46):
+        ang = random.random() * 2.0 * math.pi
+        rr = math.sqrt(random.random())
+        sx = int(1024 + (rx - 34) * rr * math.cos(ang))
+        sy = int(top_y - 4 + 38 * rr * math.sin(ang))
+        cv.disc(sx, sy, random.randint(3, 7), TOAST)
+
+
+def draw_stack(cv):
+    for top_y, rx in PANCAKES:
+        draw_pancake(cv, top_y, rx)
+
+
+def draw_drip(cv, x, y0, length, width):
+    """A syrup drip: vertical rounded bar with a rounded end + gloss."""
+    cv.rect(x - width // 2, y0, x + width // 2, y0 + length, SYRUP)
+    cv.disc(x, y0 + length, width // 2, SYRUP)
+    cv.disc(x, y0, width // 2, SYRUP)
+    for yy in range(y0 + 10, y0 + length - 6, 3):
+        cv.run(yy, x - width // 2 + 5, x - width // 2 + 8, SYRUP_LIGHT)
+
+
+def draw_syrup(cv):
+    """Glossy pool on the top pancake, drips down the stack, gloss arcs."""
+    top_y, rx = PANCAKES[-1]
+    cv.ellipse(1024, top_y - 2, rx - 42, 44, SYRUP)
+    cv.ellipse(1024, top_y - 8, rx - 78, 34, SYRUP_LIGHT)
+    cv.ellipse(1024, top_y - 4, rx - 130, 26, SYRUP)
+    cv.arc_chain(1024, top_y - 6, rx - 120, math.pi * 1.08, math.pi * 1.92, 40, 7,
+                 SYRUP_LIGHT)
+    # drips running down the stack sides
+    draw_drip(cv, 700, top_y + 6, 210, 30)
+    draw_drip(cv, 806, top_y + 2, 330, 26)
+    draw_drip(cv, 1330, top_y + 4, 260, 28)
+    draw_drip(cv, 1422, top_y + 8, 150, 24)
+    draw_drip(cv, 1024, top_y + 10, 120, 26)
+
+
+def draw_butter(cv):
+    """Melting square pat of butter on top, with a drip off its edge."""
+    cv.rounded_rect(950, 862, 1110, 946, 22, BUTTER_EDGE)
+    cv.rounded_rect(958, 868, 1102, 938, 18, BUTTER)
+    cv.rect(972, 880, 1090, 892, (255, 240, 160))
+    # butter melting: a drip sliding off the right edge
+    cv.rect(1096, 920, 1120, 968, BUTTER)
+    cv.disc(1108, 968, 12, BUTTER)
+    cv.disc(1108, 968, 6, BUTTER_EDGE)
+
+
+def draw_blueberry(cv, cx, cy, r):
+    cv.disc(cx, cy, r, BERRY)
+    cv.disc(cx - r // 3, cy - r // 3, r // 2, BERRY_LIGHT)
+    cv.disc(cx + r // 4, cy + r // 4, r // 5, (20, 26, 70))
+    # little crown dent on top
+    cv.disc(cx, cy - r + 6, r // 4, (16, 20, 58))
+
+
+def draw_strawberry_half(cv, cx, cy):
+    """Halved strawberry on the plate: red rim, pale cut flesh, seeds."""
+    cv.half_ellipse(cx, cy - 46, 96, 104, STRAW_RED)
+    cv.half_ellipse(cx, cy - 40, 80, 88, STRAW_FLESH)
+    cv.half_ellipse(cx, cy - 40, 58, 64, (252, 196, 188))
+    for _ in range(16):
+        ang = random.random() * math.pi  # lower half only
+        rr = math.sqrt(random.random())
+        sx = int(cx + 62 * rr * math.cos(ang))
+        sy = int(cy - 40 + 66 * rr * math.sin(ang))
+        cv.disc(sx, sy, 4, SEED)
+    # leafy top
+    cv.disc(cx - 26, cy - 44, 12, (46, 120, 52))
+    cv.disc(cx + 26, cy - 44, 12, (46, 120, 52))
+    cv.disc(cx, cy - 52, 12, (58, 138, 60))
+
+
+def draw_sugar(cv):
+    top_y, rx = PANCAKES[-1]
+    for _ in range(150):
+        ang = random.random() * 2.0 * math.pi
+        rr = math.sqrt(random.random())
+        sx = int(1024 + (rx - 60) * rr * math.cos(ang))
+        sy = int(top_y - 6 + 36 * rr * math.sin(ang))
+        cv.disc(sx, sy, random.randint(2, 4), SUGAR)
+
+
+def draw_steam(cv):
+    """Thin wavy steam wisps: chains of pale discs rising above the stack."""
+    for base_x, phase, amp in ((880, 0.0, 34), (1024, 1.7, 44),
+                              (1170, 3.4, 30), (960, 4.6, 26)):
+        y = 900
+        step = 0
+        while y > 240:
+            sway = int(amp * math.sin(y / 170.0 + phase))
+            r = 16 + int(12 * math.sin(step * 0.55) ** 2)
+            cv.disc(base_x + sway, y, r, STEAM)
+            y -= 34
+            step += 1
+
+
+def downsample(cv):
+    """2x2 average down to 1024x1024, applying a corner vignette.
+
+    Vignette factors come from a lookup table indexed by normalized
+    squared distance from the centre, so the per-pixel work stays cheap.
+    """
+    table = []
+    for i in range(1025):
+        t = i / 1024.0
+        table.append(1.0 - 0.30 * (t ** 1.6))
+    out = bytearray(FINAL * FINAL * 3)
+    src = cv.px
+    sw = BIG * 3
+    for oy in range(FINAL):
+        dy = oy - FINAL // 2
+        sy = oy * 2
+        orow = oy * FINAL * 3
+        srow0 = sy * sw
+        srow1 = srow0 + sw
+        for ox in range(FINAL):
+            dx = ox - FINAL // 2
+            d2 = (dx * dx + dy * dy) * 1024 // (512 * 512 * 2)
+            if d2 > 1024:
+                d2 = 1024
+            f = table[d2]
+            sx = ox * 2 * 3
+            i00 = srow0 + sx
+            i01 = i00 + 3
+            i10 = srow1 + sx
+            i11 = i10 + 3
+            o = orow + ox * 3
+            out[o] = int((src[i00] + src[i01] + src[i10] + src[i11]) * 0.25 * f)
+            out[o + 1] = int((src[i00 + 1] + src[i01 + 1] + src[i10 + 1] + src[i11 + 1]) * 0.25 * f)
+            out[o + 2] = int((src[i00 + 2] + src[i01 + 2] + src[i10 + 2] + src[i11 + 2]) * 0.25 * f)
+    return bytes(out)
+
+
+def encode_png(rgb, size):
+    """Hand-rolled PNG: signature, IHDR, zlib IDAT, IEND."""
+    def chunk(tag, payload):
+        return (struct.pack(">I", len(payload)) + tag + payload +
+                struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    stride = size * 3
     raw = bytearray()
-    for y in range(H):
-        raw.append(0)
-        raw += out[y * W * 3:(y + 1) * W * 3]
-    comp = zlib.compress(bytes(raw), 6)
+    for y in range(size):
+        raw.append(0)  # filter: none
+        raw += rgb[y * stride:(y + 1) * stride]
+    data = zlib.compress(bytes(raw), 6)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) +
+            chunk(b"IDAT", data) + chunk(b"IEND", b""))
 
-    def chunk(typ, payload):
-        return (struct.pack(">I", len(payload)) + typ + payload +
-                struct.pack(">I", zlib.crc32(typ + payload) & 0xFFFFFFFF))
 
-    png = (b"\x89PNG\r\n\x1a\n" +
-           chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)) +
-           chunk(b"IDAT", comp) +
-           chunk(b"IEND", b""))
+def main():
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "entry.png")
 
-    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
-    os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, "entry.png")
+    cv = Canvas(BIG)
+    draw_background(cv)
+    draw_table(cv)
+    draw_plate(cv)
+    draw_syrup_pool_on_plate(cv)
+    draw_stack(cv)
+    draw_syrup(cv)
+    draw_butter(cv)
+    draw_blueberry(cv, 872, 906, 52)
+    draw_blueberry(cv, 1176, 898, 48)
+    draw_blueberry(cv, 1084, 856, 42)
+    draw_blueberry(cv, 636, 1496, 50)
+    draw_blueberry(cv, 1448, 1484, 54)
+    draw_strawberry_half(cv, 742, 1560)
+    draw_strawberry_half(cv, 1330, 1572)
+    draw_sugar(cv)
+    draw_steam(cv)
+
+    png = encode_png(downsample(cv), FINAL)
     with open(path, "wb") as fh:
         fh.write(png)
-    print("wrote %s %d bytes %dx%d" % (path, len(png), W, H))
+    print("wrote %s (%d bytes)" % (path, len(png)))
 
 
 if __name__ == "__main__":
